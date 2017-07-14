@@ -19,7 +19,7 @@ using addr_t = std::uintptr_t;
 
 class breakpoint {
 public:
-    breakpoint() = default;
+    breakpoint() : m_pid{0}, m_addr{0}, m_enabled{false}, m_saved_data{0} {}
     breakpoint(pid_t pid, addr_t addr) : m_pid{pid}, m_addr{addr}, m_enabled{false}, m_saved_data{} {}
 
     void enable() {
@@ -81,6 +81,7 @@ private:
     template <class T>
     T read_from_inferior(addr_t& addr);
     addr_t get_pc();
+    void set_pc(addr_t pc);
 
     pid_t m_pid;
     elf::elf m_elf;
@@ -88,7 +89,6 @@ private:
     addr_t m_rendezvous_addr = 0;
     breakpoint m_entry_breakpoint;
     breakpoint m_linker_breakpoint;
-    bool m_hit_entry = false;
 };
 
 uint64_t tracer::read_word(addr_t& addr) {
@@ -111,8 +111,6 @@ std::string tracer::read_string(addr_t& start_addr) {
                 start_addr = addr + i;
                 return str;
             }
-
-            addr += 4;
         }
         word = read_word(addr);
     }
@@ -136,6 +134,14 @@ addr_t tracer::get_pc() {
     return regs.rip;
 }
 
+void tracer::set_pc(addr_t pc) {
+    user_regs_struct regs;
+    ptrace(PTRACE_GETREGS, m_pid, nullptr, &regs);
+    regs.rip = pc;
+    ptrace(PTRACE_SETREGS, m_pid, nullptr, &regs);
+}
+
+
 void tracer::resolve_rendezvous() {
     auto dyn_section = m_elf.get_section(".dynamic");
     auto addr = dyn_section.get_hdr().addr;
@@ -143,10 +149,11 @@ void tracer::resolve_rendezvous() {
 
     while (val != 0) {
         if (val == DT_DEBUG) {
-            m_rendezvous_addr = read_word(addr)+4;
-            auto rendezvous = read_from_inferior<r_debug>(m_rendezvous_addr);
-            m_linker_breakpoint = breakpoint{m_pid, rendezvous.r_brk};
-            m_linker_breakpoint.enable();
+            auto rend_addr = read_word(addr);
+            m_rendezvous_addr = rend_addr;
+            auto rendezvous = read_from_inferior<r_debug>(rend_addr);
+            //m_linker_breakpoint = breakpoint{m_pid, rendezvous.r_brk};
+            //m_linker_breakpoint.enable();
             return;
         }
 
@@ -164,7 +171,8 @@ void tracer::update_libraries() {
     }
 
     std::set<lib_info> new_libs{};
-    auto rendezvous = read_from_inferior<r_debug>(m_rendezvous_addr);
+    auto rend_addr = m_rendezvous_addr;
+    auto rendezvous = read_from_inferior<r_debug>(rend_addr);
     auto link_map_addr = rendezvous.r_map;
 
     while (link_map_addr) {
@@ -172,7 +180,7 @@ void tracer::update_libraries() {
         auto map = read_from_inferior<link_map>(addr);
         auto name_addr = (uint64_t)map.l_name;
         auto name = read_string(name_addr);
-        new_libs.emplace(map.l_name, map.l_addr);
+        new_libs.emplace(name, map.l_addr);
         link_map_addr = map.l_next;
     }
 
@@ -187,11 +195,11 @@ void tracer::update_libraries() {
                         std::back_inserter(loaded));
 
     for (auto&& lib : loaded) {
-        std::cout << "Loaded " << lib.name << " at 0x" << std::hex << lib.addr;
+        std::cout << "Loaded " << lib.name << " at 0x" << std::hex << lib.addr << std::endl;
     }
 
     for (auto&& lib : unloaded) {
-        std::cout << "Unloaded " << lib.name << " at 0x" << std::hex << lib.addr;
+        std::cout << "Unloaded " << lib.name << " at 0x" << std::hex << lib.addr << std::endl;
     }
 
     m_libraries = new_libs;
@@ -202,26 +210,39 @@ void tracer::wait_for_signal() {
     auto options = 0;
     waitpid(m_pid, &wait_status, options);
 
+    if (WIFEXITED(wait_status)) {
+        std::cout << "Process exited\n";
+        exit(0);
+    }
+
     siginfo_t info;
     ptrace(PTRACE_GETSIGINFO, m_pid, nullptr, &info);
 
     if (info.si_signo == SIGTRAP) {
-        if (!m_hit_entry) {
+        if (m_entry_breakpoint.is_enabled()) {
             if (get_pc() == m_entry_breakpoint.get_address() + 1) {
-                m_hit_entry = true;
                 update_libraries();
                 m_entry_breakpoint.disable();
+                set_pc(get_pc()-1);
             }
         }
-        else {
+        else if (get_pc() == m_linker_breakpoint.get_address() + 1) {
             update_libraries();
+            set_pc(get_pc()-1);
+            m_linker_breakpoint.disable();
+            ptrace(PTRACE_SINGLESTEP, m_pid, nullptr, nullptr);
+            int wait_status;
+            auto options = 0;
+            waitpid(m_pid, &wait_status, options);
+            m_linker_breakpoint.enable();
         }
     }
 }
 
 void tracer::trace() {
-    wait_for_signal();
+    ptrace(PTRACE_SETOPTIONS, m_pid, nullptr, PTRACE_O_TRACEEXIT);
 
+    wait_for_signal();
     auto entry_point = m_elf.get_hdr().entry;
     m_entry_breakpoint = breakpoint{m_pid, entry_point};
     m_entry_breakpoint.enable();
