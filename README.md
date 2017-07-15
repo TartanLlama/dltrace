@@ -9,7 +9,7 @@ A demonstration of tracing dynamic library loading and unloading on Linux.
 - The rendezvous structure is initialized before the execution of the program begins.
 
 ### Algorithm
-- The tracer looks up the entry point of the program in the ELF header (or it could use the auxillary vector stored in /proc/<pid>/aux)
+- The tracer looks up the entry point of the program in the ELF header (or it could use the auxillary vector stored in /proc/&gt;pid&lt;/aux)
 - The tracer places a breakpoint on the entry point of the program and begins execution.
 - When the breakpoint is hit, the address of the rendezvous structure is found by looking up the load address of `.dynamic` in the ELF file.
 - The rendezvous structure is examined to get the list of currently loaded libraries.
