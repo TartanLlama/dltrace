@@ -143,6 +143,7 @@ void tracer::set_pc(addr_t pc) {
 
 
 void tracer::resolve_rendezvous() {
+    // Rendezvous address is found in the .dynamic section
     auto dyn_section = m_elf.get_section(".dynamic");
     auto addr = dyn_section.get_hdr().addr;
     auto val = read_word(addr);
@@ -152,6 +153,8 @@ void tracer::resolve_rendezvous() {
             auto rend_addr = read_word(addr);
             m_rendezvous_addr = rend_addr;
             auto rendezvous = read_from_inferior<r_debug>(rend_addr);
+            // The .dynamic section stores a pointer to a function which is called whenever
+            // a .so is loaded or unloaded
             m_linker_breakpoint = breakpoint{m_pid, rendezvous.r_brk};
             m_linker_breakpoint.enable();
             return;
@@ -175,11 +178,13 @@ void tracer::update_libraries() {
     auto rendezvous = read_from_inferior<r_debug>(rend_addr);
     auto link_map_addr = rendezvous.r_map;
 
+    // The link map defines a linked list of .so entries
     while (link_map_addr) {
         auto addr = reinterpret_cast<addr_t>(link_map_addr);
         auto map = read_from_inferior<link_map>(addr);
         auto name_addr = (uint64_t)map.l_name;
         auto name = read_string(name_addr);
+        // If the name is empty, it's probably the exe or vdso. Just ignore it.
         if (name != "") {
             new_libs.emplace(name, map.l_addr);
         }
