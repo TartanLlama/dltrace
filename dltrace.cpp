@@ -152,8 +152,8 @@ void tracer::resolve_rendezvous() {
             auto rend_addr = read_word(addr);
             m_rendezvous_addr = rend_addr;
             auto rendezvous = read_from_inferior<r_debug>(rend_addr);
-            //m_linker_breakpoint = breakpoint{m_pid, rendezvous.r_brk};
-            //m_linker_breakpoint.enable();
+            m_linker_breakpoint = breakpoint{m_pid, rendezvous.r_brk};
+            m_linker_breakpoint.enable();
             return;
         }
 
@@ -180,7 +180,9 @@ void tracer::update_libraries() {
         auto map = read_from_inferior<link_map>(addr);
         auto name_addr = (uint64_t)map.l_name;
         auto name = read_string(name_addr);
-        new_libs.emplace(name, map.l_addr);
+        if (name != "") {
+            new_libs.emplace(name, map.l_addr);
+        }
         link_map_addr = map.l_next;
     }
 
